@@ -5,6 +5,8 @@ from collections import OrderedDict
 from PIL import Image
 import numpy as np
 from matplotlib import pyplot as plt
+import cv2
+import time
 
 from torch.nn.functional import upsample
 
@@ -14,7 +16,7 @@ from dataloaders import helpers as helpers
 
 modelName = 'dextr_pascal-sbd'
 pad = 50
-thres = 0.8
+thres = 0.6
 gpu_id = 0
 device = torch.device("cuda:"+str(gpu_id) if torch.cuda.is_available() else "cpu")
 
@@ -36,7 +38,9 @@ net.eval()
 net.to(device)
 
 #  Read image and click the points
-image = np.array(Image.open('ims/dog-cat.jpg'))
+image = np.array(Image.open('D:/Downloads/IMG_0802 23-05-2020_19h43m00.JPG.png'))
+if image.shape[2] > 3:
+    image = image[:,:,:-1]
 plt.ion()
 plt.axis('off')
 plt.imshow(image)
@@ -55,10 +59,15 @@ with torch.no_grad():
                 print('Exiting...')
             sys.exit()
 
+        st = time.time()
+
         #  Crop image to the bounding box from the extreme points and resize
         bbox = helpers.get_bbox(image, points=extreme_points_ori, pad=pad, zero_pad=True)
         crop_image = helpers.crop_from_bbox(image, bbox, zero_pad=True)
         resize_image = helpers.fixed_resize(crop_image, (512, 512)).astype(np.float32)
+
+        crop_time = time.time() - st
+        print(f"crop time: {crop_time}")
 
         #  Generate extreme point heat map normalized to image values
         extreme_points = extreme_points_ori - [np.min(extreme_points_ori[:, 0]), np.min(extreme_points_ori[:, 1])] + [pad,
@@ -67,6 +76,8 @@ with torch.no_grad():
         extreme_heatmap = helpers.make_gt(resize_image, extreme_points, sigma=10)
         extreme_heatmap = helpers.cstm_normalize(extreme_heatmap, 255)
 
+        heatmap_time = time.time() - crop_time - st
+        print(f"heatmap time: {heatmap_time}")
         #  Concatenate inputs and convert to tensor
         input_dextr = np.concatenate((resize_image, extreme_heatmap[:, :, np.newaxis]), axis=2)
         inputs = torch.from_numpy(input_dextr.transpose((2, 0, 1))[np.newaxis, ...])
@@ -77,13 +88,40 @@ with torch.no_grad():
         outputs = upsample(outputs, size=(512, 512), mode='bilinear', align_corners=True)
         outputs = outputs.to(torch.device('cpu'))
 
+        dextr_time = time.time() - heatmap_time - st
+        print(f"dextr time: {dextr_time}")
+
         pred = np.transpose(outputs.data.numpy()[0, ...], (1, 2, 0))
         pred = 1 / (1 + np.exp(-pred))
         pred = np.squeeze(pred)
         result = helpers.crop2fullmask(pred, bbox, im_size=image.shape[:2], zero_pad=True, relax=pad) > thres
 
+        kernel = np.ones((25,25),np.uint8)
+        result = cv2.morphologyEx(result.astype(np.uint8), cv2.MORPH_OPEN, kernel)
         results.append(result)
+        print(result.shape)
+        #print(result)
 
+        contours,hierarchy = cv2.findContours(255*result.astype(np.uint8), 1, 2)
+        [print(len(cnt)) for cnt in contours]
+        if len(contours) > 0:
+            sizes = [len(cnt) for cnt in contours]
+            largest = sizes.index(max(sizes))
+        else:
+            continue
+
+        print(len(contours))
+        cnt = contours[largest]
+        M = cv2.moments(cnt)
+        epsilon = 0.005*cv2.arcLength(cnt,True)
+        approx = cv2.approxPolyDP(cnt,epsilon,True)
+        #cv2.drawContours(255*result.astype(np.uint8), contours, -1, (0,255,0), 3)
+        #print(approx)
+
+        contour_time = time.time() - dextr_time - st
+        print(f"contour time: {contour_time}")
         # Plot the results
         plt.imshow(helpers.overlay_masks(image / 255, results))
         plt.plot(extreme_points_ori[:, 0], extreme_points_ori[:, 1], 'gx')
+        for elem in approx:
+            plt.plot(elem[0][0],elem[0][1],'bx')
