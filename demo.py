@@ -38,7 +38,7 @@ net.eval()
 net.to(device)
 
 #  Read image and click the points
-image = np.array(Image.open('D:/Downloads/IMG_0802 23-05-2020_19h43m00.JPG.png'))
+image = np.array(Image.open('ims/dog-cat.jpg'))
 if image.shape[2] > 3:
     image = image[:,:,:-1]
 plt.ion()
