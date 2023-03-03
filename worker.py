@@ -80,8 +80,8 @@ def get_image(db):
     logger.info(q[0])
     data = json.loads(q[1].decode("utf-8"))
     metadata = data['metadata']
-    imageIDs = []
     # deserialize the object and obtain the input image
+    image_id = data["id"]
     img_width = data["width"]
     img_height = data["height"]
     image = base64_decode_image(data["image"],
@@ -89,7 +89,7 @@ def get_image(db):
         (1, img_height, img_width,
             int(os.getenv("IMAGE_CHANS"))))
     points = np.array(metadata["points"], dtype=int)
-    return image, points
+    return image, points, image_id
 
 def find_contour(image, points, net, device):
     pad = 50
@@ -147,6 +147,7 @@ def find_contour(image, points, net, device):
     M = cv2.moments(cnt)
     epsilon = 0.005*cv2.arcLength(cnt,True)
     approx = cv2.approxPolyDP(cnt,epsilon,True)
+    approx = np.squeeze(approx).tolist()
 
     contour_time = time.time() - dextr_time - st
     logger.info(f"contour time: {contour_time}")
@@ -158,5 +159,6 @@ if __name__ == '__main__':
         db = init_redis()
         logger.info(f"DEXTR worker initialized!")
         while True:
-            image, points = get_image(db)
+            image, points, image_id = get_image(db)
             poly = find_contour(image, points, net, device)
+            db.set(image_id, json.dumps(poly))
