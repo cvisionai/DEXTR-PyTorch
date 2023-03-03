@@ -5,18 +5,18 @@ import sys
 import torch
 import redis
 from collections import OrderedDict
-from PIL import Image
 import numpy as np
-from matplotlib import pyplot as plt
 import cv2
 import time
 import logging
+import json
+import base64
 
 from torch.nn.functional import upsample
 
+from dataloaders import helpers as helpers
 import networks.deeplab_resnet as resnet
 from mypath import Path
-from dataloaders import helpers as helpers
 
 logging.basicConfig(
     handlers=[logging.StreamHandler()],
@@ -27,12 +27,24 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+def base64_decode_image(a, dtype, shape):
+    # if this is Python 3, we need the extra step of encoding the
+    # serialized NumPy string as a byte object
+    if sys.version_info.major == 3:
+        a = bytes(a, encoding="utf-8")
+
+    # convert the string to a NumPy array using the supplied data
+    # type and target shape
+    a = np.frombuffer(base64.decodestring(a), dtype=dtype)
+    a = a.reshape(shape)
+
+    # return the decoded image
+    return a
+
 
 def init_model():
     """Initializes the model"""
     modelName = 'dextr_pascal-sbd'
-    pad = 50
-    thres = 0.6
     gpu_id = 0
     device = torch.device("cuda:"+str(gpu_id) if torch.cuda.is_available() else "cpu")
 
@@ -41,7 +53,6 @@ def init_model():
     logger.info("Initializing weights from: {}".format(os.path.join(Path.models_dir(), modelName + '.pth')))
     state_dict_checkpoint = torch.load(os.path.join(Path.models_dir(), modelName + '.pth'),
                                        map_location=lambda storage, loc: storage)
-    logger.info("FINISHED TORCH LOAD")
     # Remove the prefix .module from the model when it is trained using DataParallel
     if 'module.' in list(state_dict_checkpoint.keys())[0]:
         new_state_dict = OrderedDict()
@@ -53,7 +64,7 @@ def init_model():
     net.load_state_dict(new_state_dict)
     net.eval()
     net.to(device)
-    return net
+    return net, device
 
 def init_redis():
     """Initializes redis client"""
@@ -67,20 +78,23 @@ def get_image(db):
     # monitor queue for jobs and grab one when present
     q = db.blpop(os.getenv("IMAGE_QUEUE_DEXTR"))
     logger.info(q[0])
-    q = q[1]
+    data = json.loads(q[1].decode("utf-8"))
+    metadata = data['metadata']
     imageIDs = []
     # deserialize the object and obtain the input image
-    q = json.loads(q.decode("utf-8"))
-    img_width = q["width"]
-    img_height = q["height"]
-    image = helpers.base64_decode_image(q["image"],
+    img_width = data["width"]
+    img_height = data["height"]
+    image = base64_decode_image(data["image"],
         os.getenv("IMAGE_DTYPE"),
         (1, img_height, img_width,
             int(os.getenv("IMAGE_CHANS"))))
-    points = np.array(q["points"])
+    points = np.array(metadata["points"], dtype=int)
     return image, points
 
-def find_contour(image, points, net):
+def find_contour(image, points, net, device):
+    pad = 50
+    thres = 0.6
+    st = time.time()
     #  Crop image to the bounding box from the extreme points and resize
     bbox = helpers.get_bbox(image, points=points, pad=pad, zero_pad=True)
     crop_image = helpers.crop_from_bbox(image, bbox, zero_pad=True)
@@ -90,7 +104,7 @@ def find_contour(image, points, net):
     logger.info(f"crop time: {crop_time}")
 
     #  Generate extreme point heat map normalized to image values
-    extreme_points = extreme_points_ori - [np.min(points[:, 0]), np.min(points[:, 1])] + [pad,
+    extreme_points = points - [np.min(points[:, 0]), np.min(points[:, 1])] + [pad,
                                                                                                                   pad]
     extreme_points = (512 * extreme_points * [1 / crop_image.shape[1], 1 / crop_image.shape[0]]).astype(np.int)
     extreme_heatmap = helpers.make_gt(resize_image, extreme_points, sigma=10)
@@ -110,17 +124,15 @@ def find_contour(image, points, net):
 
     dextr_time = time.time() - heatmap_time - st
     logger.info(f"dextr time: {dextr_time}")
+    logger.info(outputs.size())
 
     pred = np.transpose(outputs.data.numpy()[0, ...], (1, 2, 0))
     pred = 1 / (1 + np.exp(-pred))
     pred = np.squeeze(pred)
-    result = helpers.crop2fullmask(pred, bbox, im_size=image.shape[:2], zero_pad=True, relax=pad) > thres
+    result = helpers.crop2fullmask(pred, bbox, logger, im_size=image.shape[1:3], zero_pad=True, relax=pad) > thres
 
     kernel = np.ones((25,25),np.uint8)
     result = cv2.morphologyEx(result.astype(np.uint8), cv2.MORPH_OPEN, kernel)
-    results.append(result)
-    logger.info(result.shape)
-    #logger.info(result)
 
     contours,hierarchy = cv2.findContours(255*result.astype(np.uint8), 1, 2)
     [logger.info(len(cnt)) for cnt in contours]
@@ -128,24 +140,23 @@ def find_contour(image, points, net):
         sizes = [len(cnt) for cnt in contours]
         largest = sizes.index(max(sizes))
     else:
-        raise Exception(f"Couldn't find any contours!")
+        logger.error(f"Couldn't find any contours!")
+        return []
 
-    logger.info(len(contours))
     cnt = contours[largest]
     M = cv2.moments(cnt)
     epsilon = 0.005*cv2.arcLength(cnt,True)
     approx = cv2.approxPolyDP(cnt,epsilon,True)
-    #cv2.drawContours(255*result.astype(np.uint8), contours, -1, (0,255,0), 3)
-    #logger.info(approx)
 
     contour_time = time.time() - dextr_time - st
     logger.info(f"contour time: {contour_time}")
     return approx
 
 if __name__ == '__main__':
-
-    net = init_model()
-    db = init_redis()
-    while True:
-        image, points = get_image(db)
-        poly = find_countour(image, points, net)
+    with torch.no_grad():
+        net, device = init_model()
+        db = init_redis()
+        logger.info(f"DEXTR worker initialized!")
+        while True:
+            image, points = get_image(db)
+            poly = find_contour(image, points, net, device)

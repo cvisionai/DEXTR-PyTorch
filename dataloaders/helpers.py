@@ -17,7 +17,7 @@ def tens2image(im):
         return tmp.transpose((1, 2, 0))
 
 
-def crop2fullmask(crop_mask, bbox, im=None, im_size=None, zero_pad=False, relax=0, mask_relax=True,
+def crop2fullmask(crop_mask, bbox, logger, im=None, im_size=None, zero_pad=False, relax=0, mask_relax=True,
                   interpolation=cv2.INTER_CUBIC, scikit=False):
     if scikit:
         from skimage.transform import resize as sk_resize
