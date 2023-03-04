@@ -180,6 +180,7 @@ def get_bbox(mask, points=None, pad=0, zero_pad=False):
 
 
 def crop_from_bbox(img, bbox, zero_pad=False):
+    img = np.squeeze(img)
     # Borders of image
     bounds = (0, 0, img.shape[1] - 1, img.shape[0] - 1)
 
@@ -204,7 +205,6 @@ def crop_from_bbox(img, bbox, zero_pad=False):
     # Simple per element addition in the tuple
     inds = tuple(map(sum, zip(bbox_valid, offsets + offsets)))
 
-    img = np.squeeze(img)
     if img.ndim == 2:
         crop[inds[1]:inds[3] + 1, inds[0]:inds[2] + 1] = \
             img[bbox_valid[1]:bbox_valid[3] + 1, bbox_valid[0]:bbox_valid[2] + 1]
